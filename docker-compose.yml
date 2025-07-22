@@ -1,0 +1,114 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    container_name: log_analyzer_postgres
+    environment:
+      POSTGRES_DB: log_analyzer
+      POSTGRES_USER: log_user
+      POSTGRES_PASSWORD: log_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U log_user -d log_analyzer"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis - Message Broker & Cache
+  redis:
+    image: redis:7-alpine
+    container_name: log_analyzer_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI Application
+  fastapi:
+    build: .
+    container_name: log_analyzer_api
+    ports:
+      - "8001:8000"
+    environment:
+      - DATABASE_URL=postgresql://log_user:log_password@postgres:5432/log_analyzer
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  # Celery Worker
+  celery_worker:
+    build: .
+    container_name: log_analyzer_worker
+    command: celery -A main.celery_app worker --loglevel=info --concurrency=4
+    environment:
+      - DATABASE_URL=postgresql://log_user:log_password@postgres:5432/log_analyzer
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  # Celery Beat (Scheduled Tasks - opsiyonel)
+  celery_beat:
+    build: .
+    container_name: log_analyzer_beat
+    command: celery -A main.celery_app beat --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://log_user:log_password@postgres:5432/log_analyzer
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  # Flower - Celery Monitoring (opsiyonel)
+  flower:
+    build: .
+    container_name: log_analyzer_flower
+    command: celery -A main.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+# Volumes for data persistence
+volumes:
+  postgres_data:
+  redis_data:
+
+# Network for service communication
+networks:
+  default:
+    name: log_analyzer_network
